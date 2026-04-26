@@ -1,0 +1,247 @@
+"""
+╔════════════════════════════════════╗
+║   ROBO-ADVISOR                     ║
+║   Bitget Stock Token Analyzer      ║
+╚════════════════════════════════════╝
+pip install requests
+python bot.py
+"""
+
+import os, time, math, datetime, requests
+
+# ═════ CONFIG (KHÔNG LỘ TOKEN) ═════
+TELEGRAM_BOT_TOKEN = 
+TELEGRAM_CHAT_ID   = 
+
+WHITELIST = [
+    # Big Tech
+    "AAPLUSDT", "MSFTUSDT", "AMZNUSDT", "GOOGLUSDT", "METAUSDT", "NVDAUSDT",
+
+    # Semiconductors
+    "AMDUSDT", "TSMUSDT", "INTCUSDT", "ASMLUSDT",
+
+    # Crypto-related stocks
+    "COINUSDT", "MSTRUSDT",
+
+    # EV / Tech Growth
+    "TSLAUSDT", "RIVNUSDT", "LCIDUSDT",
+
+    # Fintech
+    "SOFIUSDT", "SQUSDT", "PYPLUSDT",
+
+    # Aerospace / Speculative
+    "RKLBUSDT", "PLNTUSDT", "SPCEUSDT",
+
+    # Misc high volatility stocks
+    "PLTRUSDT", "BBAIUSDT", "AIUSDT"
+]
+VCP = {
+    # Big Tech
+    "AAPLUSDT": 180.00,
+    "MSFTUSDT": 420.00,
+    "AMZNUSDT": 170.00,
+    "GOOGLUSDT": 150.00,
+    "METAUSDT": 480.00,
+    "NVDAUSDT": 820.00,
+
+    # Semiconductors
+    "AMDUSDT": 155.00,
+    "TSMUSDT": 145.00,
+    "INTCUSDT": 78.96,
+    "ASMLUSDT": 700.00,
+
+    # Crypto stocks
+    "COINUSDT": 210.00,
+    "MSTRUSDT": 380.00,
+
+    # EV / Growth
+    "TSLAUSDT": 250.00,
+    "RIVNUSDT": 18.00,
+    "LCIDUSDT": 20.00,
+
+    # Fintech
+    "SOFIUSDT": 8.50,
+    "SQUSDT": 75.00,
+    "PYPLUSDT": 60.00,
+
+    # Aerospace / speculative
+    "RKLBUSDT": 5.20,
+    "PLNTUSDT": 3.80,
+    "SPCEUSDT": 4.50,
+
+    # AI / speculative tech
+    "PLTRUSDT": 18.00,
+    "BBAIUSDT": 3.20,
+    "AIUSDT": 25.00
+}
+
+BITGET = "https://api.bitget.com"
+INTERVAL = "1H"
+CANDLE_LIMIT = 150
+POLL_SECONDS = 300
+
+# ═════ INDICATORS ═════
+def sma(x,n): return sum(x[-n:])/n if len(x)>=n else None
+
+def ema(data,n):
+    if len(data)<n: return None
+    k=2/(n+1); v=sum(data[:n])/n
+    for p in data[n:]: v=p*k+v*(1-k)
+    return v
+
+def rsi(c,p=14):
+    if len(c)<p+1: return None
+    g,l=[],[]
+    for i in range(1,len(c)):
+        d=c[i]-c[i-1]
+        g.append(max(d,0)); l.append(max(-d,0))
+    ag=sum(g[-p:])/p; al=sum(l[-p:])/p
+    return 100 if al==0 else 100-100/(1+ag/al)
+
+def bb(c):
+    m=sma(c,20)
+    if not m: return None,None,None
+    sd=math.sqrt(sum((x-m)**2 for x in c[-20:])/20)
+    return m+2*sd,m,m-2*sd
+
+def macd(c):
+    if len(c)<40: return None,None
+    f=ema(c,12); s=ema(c,26)
+    if not f or not s: return None,None
+    return f-s,f-s
+
+def atr(data,p=14):
+    if len(data)<p+1: return None
+    tr=[]
+    for i in range(1,len(data)):
+        h=data[i]["high"]; l=data[i]["low"]; pc=data[i-1]["close"]
+        tr.append(max(h-l,abs(h-pc),abs(l-pc)))
+    return sum(tr[-p:])/p
+
+# ═════ API ═════
+def fetch_candles(sym, interval="1H"):
+    try:
+        url=f"{BITGET}/api/v2/spot/market/candles"
+        r=requests.get(url,params={"symbol":sym,"granularity":interval,"limit":CANDLE_LIMIT},timeout=10)
+        j=r.json()
+        if j.get("code")!="00000": return None
+
+        data=sorted(j["data"],key=lambda x:int(x[0]))
+        return [{
+            "open":float(i[1]),
+            "high":float(i[2]),
+            "low":float(i[3]),
+            "close":float(i[4]),
+            "volume":float(i[5])
+        } for i in data]
+    except:
+        return None
+
+def fetch_price(sym):
+    try:
+        r=requests.get(f"{BITGET}/api/v2/spot/market/tickers",
+                       params={"symbol":sym},timeout=8).json()
+        t=r["data"][0]
+        return float(t["lastPr"]), float(t["change24h"])*100
+    except:
+        return None,None
+
+# ═════ ANALYSIS ═════
+def analyze(sym):
+    c=fetch_candles(sym,"1H")
+    if not c: return None
+
+    closes=[x["close"] for x in c]
+    vols=[x["volume"] for x in c]
+
+    price,chg=fetch_price(sym)
+    if not price: return None
+
+    r=rsi(closes)
+    u,m,l=bb(closes)
+    mac, sig = macd(closes)
+    a=atr(c)
+
+    vcp=VCP.get(sym,price)
+
+    pnl=price-vcp
+    pnlp=(pnl/vcp*100)
+
+    sigs=[]
+
+    if l and price<=l:
+        sigs.append(("BUY","BB oversold"))
+    if u and price>=u:
+        sigs.append(("SELL","BB overbought"))
+    if r and r<30:
+        sigs.append(("BUY","RSI oversold"))
+    if r and r>70:
+        sigs.append(("SELL","RSI overbought"))
+
+    if mac and sig and mac>sig:
+        sigs.append(("BUY","MACD bullish"))
+    if mac and sig and mac<sig:
+        sigs.append(("SELL","MACD bearish"))
+
+    buy=sum(1 for s in sigs if s[0]=="BUY")
+    sell=sum(1 for s in sigs if s[0]=="SELL")
+
+    if buy>sell: rec="🔥 BUY"
+    elif sell>buy: rec="🧊 SELL"
+    else: rec="⚖️ HOLD"
+
+    return {
+        "sym":sym,"price":price,"chg":chg,
+        "rsi":r,"atr":a,"pnl":pnl,"pnlp":pnlp,
+        "sig":sigs,"rec":rec
+    }
+
+# ═════ TELEGRAM ═════
+def send(msg):
+    if "PUT_YOUR" in TELEGRAM_BOT_TOKEN:
+        print("[TELEGRAM] chưa cấu hình")
+        return
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json={"chat_id":TELEGRAM_CHAT_ID,"text":msg,"parse_mode":"HTML"}
+    )
+
+# ═════ FORMAT ═════
+def msg(i):
+    return f"""
+🤖 ROBO-ADVISOR
+
+💎 {i['sym']}
+💰 Price: {i['price']}
+📊 Change: {i['chg']:.2f}%
+
+📉 RSI: {i['rsi']:.1f if i['rsi'] else 'N/A'}
+📊 PnL: {i['pnlp']:.2f}%
+
+⚡ Signals:
+""" + "\n".join([f"- {a[0]} | {a[1]}" for a in i["sig"]]) + f"""
+
+🎯 {i['rec']}
+"""
+
+# ═════ MAIN ═════
+def main():
+
+    send("🚀 BOT STARTED - ROBO ADVISOR")
+
+    print("BOT STARTED...")
+
+    while True:
+        for s in WHITELIST:
+            d=analyze(s)
+            if not d: continue
+
+            print(s,d["rec"],d["pnlp"])
+            if d["sig"]:
+                send(msg(d))
+
+        time.sleep(POLL_SECONDS)
+
+if __name__=="__main__":
+    main()
+ 
